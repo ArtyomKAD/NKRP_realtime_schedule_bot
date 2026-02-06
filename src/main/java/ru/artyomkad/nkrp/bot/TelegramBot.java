@@ -360,7 +360,7 @@ public class TelegramBot extends TelegramLongPollingBot {
 
     private void sendHelp(long chatId, Integer threadId, boolean isPrivate) {
         String txt = "🤖 <b>Команды:</b>\n/fg [группа] [дата], /ft [преподаватель] [дата], /fr [кабинет] [дата], /my [дата], /food";
-        if (!isPrivate) txt += "\n\n🔒 <b>Админам:</b>\n/sg [группа] - Подписка треда\n/st [фамилия] - Подписка треда";
+        if (!isPrivate) txt += "\n\n🔒 <b>Админам:</b>\n/sg [группа] - Подписка на группу\n/st [фамилия] - Подписка на преподавателя";
         sendMessageHTML(chatId, threadId, txt);
     }
 
