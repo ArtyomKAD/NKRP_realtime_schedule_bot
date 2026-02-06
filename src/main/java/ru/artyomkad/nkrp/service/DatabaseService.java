@@ -16,10 +16,17 @@ import java.util.TreeMap;
 import java.util.HashSet;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class DatabaseService implements AutoCloseable {
     private static final Logger logger = Logger.getLogger(DatabaseService.class.getName());
     private final Connection connection;
+
+    private static final String[] MONTHS_GENITIVE = {
+            "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря"
+    };
 
     public record Subscriber(long chatId, Integer messageThreadId, String platform) {}
 
@@ -101,7 +108,6 @@ public class DatabaseService implements AutoCloseable {
         }
     }
 
-    // Получаем время в зависимости от флага isMonday
     private String getBellTime(int pairNumber, boolean isMonday) {
         String col = isMonday ? "time_monday" : "time_normal";
         String sql = "SELECT " + col + " FROM bells WHERE pair_number = ?";
@@ -168,37 +174,72 @@ public class DatabaseService implements AutoCloseable {
 
     private static String getString(int type) {
         String sql;
-
-        // Если ищем преподавателя (type == 1)
         if (type == 1) {
             sql = "SELECT chat_id, message_thread_id, platform FROM users WHERE ? LIKE sub_value || '%' AND sub_type = 1";
         } else {
-            // Если ищем группу (type == 0)
             sql = "SELECT chat_id, message_thread_id, platform FROM users WHERE sub_value = ? AND sub_type = 0";
         }
         return sql;
     }
 
+    private String convertDateToRussianText(String inputDate) {
+        if (inputDate == null) return null;
+        Pattern p = Pattern.compile("^(\\d{1,2})[.\\/-](\\d{1,2})[.\\/-](\\d{2,4})$");
+        Matcher m = p.matcher(inputDate.trim());
+        if (m.find()) {
+            try {
+                int day = Integer.parseInt(m.group(1));
+                int month = Integer.parseInt(m.group(2));
+                String year = m.group(3);
+                if (year.length() == 2) year = "20" + year;
+
+                if (month >= 1 && month <= 12) {
+                    return day + " " + MONTHS_GENITIVE[month - 1] + " " + year;
+                }
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
     public String getScheduleByGroup(String groupName) {
+        return getScheduleByGroup(groupName, null);
+    }
+
+    public String getScheduleByGroup(String groupName, String date) {
         StringBuilder sb = new StringBuilder();
-        // Обязательно берем is_monday
-        String sql = "SELECT id, date_val, is_monday FROM schedules WHERE group_name LIKE ? ORDER BY id DESC LIMIT 1";
+        String sql;
+
+        String textDate = convertDateToRussianText(date);
+
+        if (date != null && !date.isEmpty()) {
+            sql = "SELECT id, date_val, is_monday FROM schedules WHERE group_name LIKE ? AND (date_val LIKE ? OR date_val LIKE ?) ORDER BY id DESC LIMIT 1";
+        } else {
+            sql = "SELECT id, date_val, is_monday FROM schedules WHERE group_name LIKE ? ORDER BY id DESC LIMIT 1";
+        }
 
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, "%" + groupName + "%");
+            if (date != null && !date.isEmpty()) {
+                ps.setString(2, "%" + date + "%");
+                ps.setString(3, "%" + (textDate != null ? textDate : date) + "%");
+            }
+
             ResultSet rs = ps.executeQuery();
 
             if (rs.next()) {
                 long scheduleId = rs.getLong("id");
-                String date = rs.getString("date_val");
-                boolean isMonday = rs.getInt("is_monday") == 1; // Получаем флаг
+                String foundDate = rs.getString("date_val");
+                boolean isMonday = rs.getInt("is_monday") == 1;
 
-                sb.append("📅 <b>").append(date).append("</b> (").append(groupName).append(")\n");
+                sb.append("📅 <b>").append(foundDate).append("</b> (").append(groupName).append(")\n");
                 if (isMonday) sb.append("<i>(Понедельник)</i>\n");
                 sb.append("\n");
 
-                appendLessons(sb, scheduleId, isMonday); // Передаем флаг
+                appendLessons(sb, scheduleId, isMonday);
             } else {
+                if (date != null && !date.isEmpty()) {
+                    return "Расписание для группы '" + groupName + "' на дату '" + date + "' не найдено.";
+                }
                 return "Расписание для группы '" + groupName + "' не найдено.";
             }
         } catch (SQLException e) {
@@ -207,18 +248,37 @@ public class DatabaseService implements AutoCloseable {
         return sb.toString();
     }
 
-
     public String getScheduleByTeacher(String teacherName) {
-        StringBuilder sb = new StringBuilder();
-        String latestDateSql = "SELECT date_val, is_monday FROM schedules ORDER BY id DESC LIMIT 1";
-        String latestDate;
-        boolean isMonday;
+        return getScheduleByTeacher(teacherName, null);
+    }
 
-        try (PreparedStatement ps = connection.prepareStatement(latestDateSql); ResultSet rs = ps.executeQuery()) {
-            if (!rs.next()) return "Расписание ещё не загружено.";
-            latestDate = rs.getString("date_val");
-            isMonday = rs.getInt("is_monday") == 1;
-        } catch (SQLException e) { return "Ошибка базы данных."; }
+    public String getScheduleByTeacher(String teacherName, String date) {
+        StringBuilder sb = new StringBuilder();
+        String targetDate;
+        boolean isMonday;
+        String textDate = convertDateToRussianText(date);
+
+        if (date != null && !date.isEmpty()) {
+            String checkDateSql = "SELECT date_val, is_monday FROM schedules WHERE (date_val LIKE ? OR date_val LIKE ?) LIMIT 1";
+            try (PreparedStatement ps = connection.prepareStatement(checkDateSql)) {
+                ps.setString(1, "%" + date + "%");
+                ps.setString(2, "%" + (textDate != null ? textDate : date) + "%");
+                ResultSet rs = ps.executeQuery();
+                if (rs.next()) {
+                    targetDate = rs.getString("date_val");
+                    isMonday = rs.getInt("is_monday") == 1;
+                } else {
+                    return "Расписание на дату " + date + " не найдено в базе.";
+                }
+            } catch (SQLException e) { return "Ошибка БД при поиске даты."; }
+        } else {
+            String latestDateSql = "SELECT date_val, is_monday FROM schedules ORDER BY id DESC LIMIT 1";
+            try (PreparedStatement ps = connection.prepareStatement(latestDateSql); ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return "Расписание ещё не загружено.";
+                targetDate = rs.getString("date_val");
+                isMonday = rs.getInt("is_monday") == 1;
+            } catch (SQLException e) { return "Ошибка базы данных."; }
+        }
 
         String sql = """
         SELECT l.pair_number, l.subject, l.start_time, s.group_name,
@@ -234,7 +294,7 @@ public class DatabaseService implements AutoCloseable {
 
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, "%" + teacherName + "%");
-            ps.setString(2, latestDate);
+            ps.setString(2, targetDate);
             ResultSet rs = ps.executeQuery();
             TreeMap<Integer, List<String>> lessonsByPair = new TreeMap<>();
 
@@ -248,9 +308,9 @@ public class DatabaseService implements AutoCloseable {
                 lessonsByPair.computeIfAbsent(pair, _ -> new ArrayList<>()).add(line);
             }
 
-            if (lessonsByPair.isEmpty()) return "На <b>" + latestDate + "</b> у преподавателя <b>" + teacherName + "</b> пар нет.";
+            if (lessonsByPair.isEmpty()) return "На <b>" + targetDate + "</b> у преподавателя <b>" + teacherName + "</b> пар нет.";
 
-            sb.append("Последнее расписание:\n📅 <b>").append(latestDate).append("</b>\n");
+            sb.append("🗓 Расписание:\n📅 <b>").append(targetDate).append("</b>\n");
             sb.append("Преподаватель: <b>").append(teacherName).append("</b>\n\n");
 
             appendFormattedMap(sb, lessonsByPair, isMonday);
@@ -260,15 +320,36 @@ public class DatabaseService implements AutoCloseable {
     }
 
     public String getScheduleByRoom(int roomNumber) {
+        return getScheduleByRoom(roomNumber, null);
+    }
+
+    public String getScheduleByRoom(int roomNumber, String date) {
         StringBuilder sb = new StringBuilder();
-        String latestDateSql = "SELECT date_val, is_monday FROM schedules ORDER BY id DESC LIMIT 1";
-        String latestDate;
+        String targetDate;
         boolean isMonday;
-        try (PreparedStatement ps = connection.prepareStatement(latestDateSql); ResultSet rs = ps.executeQuery()) {
-            if (!rs.next()) return "Расписание ещё не загружено.";
-            latestDate = rs.getString("date_val");
-            isMonday = rs.getInt("is_monday") == 1;
-        } catch (SQLException e) { return "Ошибка базы данных."; }
+        String textDate = convertDateToRussianText(date);
+
+        if (date != null && !date.isEmpty()) {
+            String checkDateSql = "SELECT date_val, is_monday FROM schedules WHERE (date_val LIKE ? OR date_val LIKE ?) LIMIT 1";
+            try (PreparedStatement ps = connection.prepareStatement(checkDateSql)) {
+                ps.setString(1, "%" + date + "%");
+                ps.setString(2, "%" + (textDate != null ? textDate : date) + "%");
+                ResultSet rs = ps.executeQuery();
+                if (rs.next()) {
+                    targetDate = rs.getString("date_val");
+                    isMonday = rs.getInt("is_monday") == 1;
+                } else {
+                    return "Расписание на дату " + date + " не найдено в базе.";
+                }
+            } catch (SQLException e) { return "Ошибка БД при поиске даты."; }
+        } else {
+            String latestDateSql = "SELECT date_val, is_monday FROM schedules ORDER BY id DESC LIMIT 1";
+            try (PreparedStatement ps = connection.prepareStatement(latestDateSql); ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return "Расписание ещё не загружено.";
+                targetDate = rs.getString("date_val");
+                isMonday = rs.getInt("is_monday") == 1;
+            } catch (SQLException e) { return "Ошибка базы данных."; }
+        }
 
         String sql = """
         SELECT l.pair_number, l.subject, s.group_name,
@@ -282,7 +363,7 @@ public class DatabaseService implements AutoCloseable {
         ORDER BY l.pair_number
         """;
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setInt(1, roomNumber); ps.setString(2, latestDate); ResultSet rs = ps.executeQuery();
+            ps.setInt(1, roomNumber); ps.setString(2, targetDate); ResultSet rs = ps.executeQuery();
             TreeMap<Integer, List<String>> lessonsByPair = new TreeMap<>();
             while (rs.next()) {
                 int pair = rs.getInt("pair_number");
@@ -293,9 +374,9 @@ public class DatabaseService implements AutoCloseable {
                 String line = subject + " — <b>" + group + "</b>" + teacherStr;
                 lessonsByPair.computeIfAbsent(pair, _ -> new ArrayList<>()).add(line);
             }
-            if (lessonsByPair.isEmpty()) return "На <b>" + latestDate + "</b> в кабинете <b>" + roomNumber + "</b> пар нет.";
+            if (lessonsByPair.isEmpty()) return "На <b>" + targetDate + "</b> в кабинете <b>" + roomNumber + "</b> пар нет.";
 
-            sb.append("Последнее расписание:\n📅 <b>").append(latestDate).append("</b>\n");
+            sb.append("🗓 Расписание:\n📅 <b>").append(targetDate).append("</b>\n");
             sb.append("Кабинет: <b>").append(roomNumber).append("</b>\n\n");
             appendFormattedMap(sb, lessonsByPair, isMonday);
             return sb.toString();
@@ -305,8 +386,6 @@ public class DatabaseService implements AutoCloseable {
     private void appendFormattedMap(StringBuilder sb, Map<Integer, List<String>> lessonsByPair, boolean isMonday) {
         for (Map.Entry<Integer, List<String>> entry : lessonsByPair.entrySet()) {
             int pair = entry.getKey();
-
-            // Получаем время с учетом флага
             String time = getBellTime(pair, isMonday);
             String timeStr = (time != null) ? " (" + time + ")" : "";
 
@@ -323,7 +402,6 @@ public class DatabaseService implements AutoCloseable {
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setLong(1, scheduleId);
             ResultSet rs = ps.executeQuery();
-            // ВАЖНО: formatLesson тоже вызывается с 3 аргументами
             while (rs.next()) formatLesson(sb, rs, isMonday);
         }
     }
@@ -331,11 +409,8 @@ public class DatabaseService implements AutoCloseable {
     private void formatLesson(StringBuilder sb, ResultSet rs, boolean isMonday) throws SQLException {
         long id = rs.getLong("id");
         int pair = rs.getInt("pair_number");
-
-        // 1. Берем время с учетом дня недели (обычный или понедельник)
         String timeStr = getBellTime(pair, isMonday);
 
-        // 2. Индивидуальное время
         String customTime = rs.getString("start_time");
         if (customTime != null && !customTime.isEmpty()) {
             timeStr = "Начало в " + customTime;
@@ -438,7 +513,6 @@ public class DatabaseService implements AutoCloseable {
 
     public List<Subscriber> getAllSubscribersUnique() {
         List<Subscriber> list = new ArrayList<>();
-        // Добавляем platform в выборку
         try (Statement stmt = connection.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT DISTINCT chat_id, message_thread_id, platform FROM users")) {
             while (rs.next()) {

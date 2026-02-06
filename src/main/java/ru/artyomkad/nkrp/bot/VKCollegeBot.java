@@ -19,6 +19,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class VKCollegeBot extends Thread {
 
@@ -28,6 +30,10 @@ public class VKCollegeBot extends Thread {
     private final Random random = new Random();
 
     private static final long VK_CREATOR_ID = 863149626;
+
+    private static final Pattern DATE_PATTERN = Pattern.compile(
+            "(?i)\\b(\\d{1,2}[.\\/-]\\d{1,2}[.\\/-]\\d{2,4}|\\d{1,2}\\s+(?:янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)[а-я]*(\\s+\\d{4})?)\\b"
+    );
 
     private enum BotState { DEFAULT, WAITING_FOR_SUB_GROUP, WAITING_FOR_SUB_TEACHER, WAITING_SEARCH_GROUP, WAITING_SEARCH_TEACHER, WAITING_SEARCH_ROOM }
     private final java.util.Map<Long, BotState> userStates = new java.util.concurrent.ConcurrentHashMap<>();
@@ -88,6 +94,8 @@ public class VKCollegeBot extends Thread {
         text = text.trim();
         String lowerText = text.toLowerCase();
 
+        ParsedArg parsed = parseDateAndArg(text);
+
         try {
             if ((lowerText.startsWith("/broadcast") || lowerText.startsWith("/b"))) {
                 if (peerId == VK_CREATOR_ID) {
@@ -113,16 +121,25 @@ public class VKCollegeBot extends Thread {
             }
 
             if (state == BotState.DEFAULT) {
+                if (lowerText.startsWith("/my") || lowerText.equals("📅 моё расписание")) {
+                    handleMySchedule(peerId, parsed);
+                    return;
+                }
+
+                if (lowerText.startsWith("/fg") || lowerText.startsWith("поиск по группе")) {
+                    if (parsed.text.toLowerCase().replace("/fg", "").replace("поиск по группе", "").trim().isEmpty()) {
+                        userStates.put(peerId, BotState.WAITING_SEARCH_GROUP);
+                        sendMenu(peerId, "✍️ Введите название группы для поиска (можно с датой, напр. 1-ИП-2 12.12.2025):", getBackKeyboard());
+                    } else {
+                        String query = parsed.text.replaceAll("(?i)/fg|поиск по группе", "").trim();
+                        sendMessage(peerId, dbService.getScheduleByGroup(query, parsed.date));
+                    }
+                    return;
+                }
+
                 switch (text) {
                     case "📅 Моё расписание":
-                        String[] sub = dbService.getUserSubscription(peerId, null, "VK");
-                        if (sub == null) sendMessage(peerId, "Нет активной подписки.");
-                        else {
-                            String res = (Integer.parseInt(sub[0]) == 0)
-                                    ? dbService.getScheduleByGroup(sub[1])
-                                    : dbService.getScheduleByTeacher(sub[1]);
-                            sendMessage(peerId, res);
-                        }
+                        handleMySchedule(peerId, null);
                         return;
                     case "🔔 Подписка":
                         sendMenu(peerId, "На что подписываемся?", getSubMenu());
@@ -148,17 +165,17 @@ public class VKCollegeBot extends Thread {
                     }
                     case "🎓 Поиск по группе" -> {
                         userStates.put(peerId, BotState.WAITING_SEARCH_GROUP);
-                        sendMenu(peerId, "✍️ Введите название группы для поиска:", getBackKeyboard());
+                        sendMenu(peerId, "✍️ Введите название группы (и дату, если нужно):", getBackKeyboard());
                         return;
                     }
                     case "👨‍🏫 Поиск по преподавателю" -> {
                         userStates.put(peerId, BotState.WAITING_SEARCH_TEACHER);
-                        sendMenu(peerId, "✍️ Введите фамилию преподавателя:", getBackKeyboard());
+                        sendMenu(peerId, "✍️ Введите фамилию преподавателя (и дату, если нужно):", getBackKeyboard());
                         return;
                     }
                     case "🚪 Поиск по кабинету" -> {
                         userStates.put(peerId, BotState.WAITING_SEARCH_ROOM);
-                        sendMenu(peerId, "✍️ Введите номер кабинета (например, 205):", getBackKeyboard());
+                        sendMenu(peerId, "✍️ Введите номер кабинета (например, 205 12.12.2025):", getBackKeyboard());
                         return;
                     }
                 }
@@ -166,25 +183,25 @@ public class VKCollegeBot extends Thread {
 
             switch (state) {
                 case WAITING_FOR_SUB_GROUP:
-                    dbService.subscribeUser(peerId, null, 0, text, "VK");
-                    sendMessage(peerId, "✅ Вы подписались на группу: " + text);
+                    dbService.subscribeUser(peerId, null, 0, parsed.text, "VK");
+                    sendMessage(peerId, "✅ Вы подписались на группу: " + parsed.text);
                     goBack(peerId);
                     break;
                 case WAITING_FOR_SUB_TEACHER:
-                    dbService.subscribeUser(peerId, null, 1, text, "VK");
-                    sendMessage(peerId, "✅ Вы подписались на преподавателя: " + text);
+                    dbService.subscribeUser(peerId, null, 1, parsed.text, "VK");
+                    sendMessage(peerId, "✅ Вы подписались на преподавателя: " + parsed.text);
                     goBack(peerId);
                     break;
                 case WAITING_SEARCH_GROUP:
-                    sendMessage(peerId, dbService.getScheduleByGroup(text));
+                    sendMessage(peerId, dbService.getScheduleByGroup(parsed.text, parsed.date));
                     break;
                 case WAITING_SEARCH_TEACHER:
-                    sendMessage(peerId, dbService.getScheduleByTeacher(text));
+                    sendMessage(peerId, dbService.getScheduleByTeacher(parsed.text, parsed.date));
                     break;
                 case WAITING_SEARCH_ROOM:
                     try {
-                        int r = Integer.parseInt(text);
-                        sendMessage(peerId, dbService.getScheduleByRoom(r));
+                        int r = Integer.parseInt(parsed.text);
+                        sendMessage(peerId, dbService.getScheduleByRoom(r, parsed.date));
                     } catch(Exception e) { sendMessage(peerId, "Пожалуйста, введите числовой номер кабинета."); }
                     break;
                 default:
@@ -195,6 +212,37 @@ public class VKCollegeBot extends Thread {
             e.printStackTrace();
             sendMessage(peerId, "Ошибка: " + e.getMessage());
         }
+    }
+
+    private void handleMySchedule(long peerId, ParsedArg parsed) throws java.sql.SQLException {
+        String[] sub = dbService.getUserSubscription(peerId, null, "VK");
+        if (sub == null) sendMessage(peerId, "Нет активной подписки.");
+        else {
+            String date = (parsed != null && parsed.date != null) ? parsed.date : null;
+            if (date == null && parsed != null && !parsed.text.isEmpty() && parsed.text.matches(".*\\d+.*")) {
+                Matcher m = DATE_PATTERN.matcher(parsed.text);
+                if (m.find()) date = m.group(1);
+            }
+
+            String res = (Integer.parseInt(sub[0]) == 0)
+                    ? dbService.getScheduleByGroup(sub[1], date)
+                    : dbService.getScheduleByTeacher(sub[1], date);
+            sendMessage(peerId, res);
+        }
+    }
+
+    private record ParsedArg(String text, String date) {}
+
+    private ParsedArg parseDateAndArg(String raw) {
+        if (raw == null || raw.isEmpty()) return new ParsedArg("", null);
+        Matcher m = DATE_PATTERN.matcher(raw);
+        String date = null;
+        String text = raw;
+        if (m.find()) {
+            date = m.group(1);
+            text = raw.replace(date, "").trim().replaceAll("\\s+", " ");
+        }
+        return new ParsedArg(text, date);
     }
 
     private void performBroadcast(long adminPeerId, String text) {

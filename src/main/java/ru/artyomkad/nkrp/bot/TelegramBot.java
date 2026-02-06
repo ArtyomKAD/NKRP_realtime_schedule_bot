@@ -18,6 +18,8 @@ import java.util.Map;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class TelegramBot extends TelegramLongPollingBot {
@@ -27,6 +29,10 @@ public class TelegramBot extends TelegramLongPollingBot {
     private final Map<Long, BotState> userStates = new ConcurrentHashMap<>();
 
     private static final long CREATOR_ID = 1921512286;
+
+    private static final Pattern DATE_PATTERN = Pattern.compile(
+            "(?i)\\b(\\d{1,2}[.\\/-]\\d{1,2}[.\\/-]\\d{2,4}|\\d{1,2}\\s+(?:янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)[а-я]*(\\s+\\d{4})?)\\b"
+    );
 
     private enum BotState {
         DEFAULT,
@@ -77,7 +83,7 @@ public class TelegramBot extends TelegramLongPollingBot {
                 switch (text) {
                     case "📅 Моё расписание":
                     case "/my":
-                        handleMySchedule(chatId, threadId);
+                        handleMySchedule(chatId, threadId, null);
                         return;
                     case "🔔 Подписка":
                         sendMenu(chatId, threadId, "На что подписываемся?", getSubMenu());
@@ -89,6 +95,11 @@ public class TelegramBot extends TelegramLongPollingBot {
                     case "/food":
                         sendCanteenMenu(chatId, threadId);
                         return;
+                }
+
+                if (text.startsWith("/my ")) {
+                    handleTextCommand(chatId, threadId, text, true, message);
+                    return;
                 }
 
                 switch (text) {
@@ -136,17 +147,20 @@ public class TelegramBot extends TelegramLongPollingBot {
                     goBackToMain(chatId, threadId);
                     break;
                 case WAITING_SEARCH_GROUP:
-                    sendMessageHTML(chatId, threadId, dbService.getScheduleByGroup(text.trim()));
+                    ParsedArg pa = parseDateAndArg(text);
+                    sendMessageHTML(chatId, threadId, dbService.getScheduleByGroup(pa.text, pa.date));
                     goBackToMain(chatId, threadId);
                     break;
                 case WAITING_SEARCH_TEACHER:
-                    sendMessageHTML(chatId, threadId, dbService.getScheduleByTeacher(text.trim()));
+                    ParsedArg pt = parseDateAndArg(text);
+                    sendMessageHTML(chatId, threadId, dbService.getScheduleByTeacher(pt.text, pt.date));
                     goBackToMain(chatId, threadId);
                     break;
                 case WAITING_SEARCH_ROOM:
                     try {
-                        int room = Integer.parseInt(text.trim());
-                        sendMessageHTML(chatId, threadId, dbService.getScheduleByRoom(room));
+                        ParsedArg pr = parseDateAndArg(text);
+                        int room = Integer.parseInt(pr.text);
+                        sendMessageHTML(chatId, threadId, dbService.getScheduleByRoom(room, pr.date));
                         goBackToMain(chatId, threadId);
                     } catch (NumberFormatException e) {
                         sendMessage(chatId, threadId, "Введите число.");
@@ -177,8 +191,10 @@ public class TelegramBot extends TelegramLongPollingBot {
         String[] parts = fullText.split("\\s+", 2);
         String command = parts[0].toLowerCase();
         if (command.contains("@")) command = command.substring(0, command.indexOf("@"));
-        String arg = parts.length > 1 ? parts[1] : "";
+        String argRaw = parts.length > 1 ? parts[1] : "";
         long userId = originalMessage.getFrom().getId();
+
+        ParsedArg parsed = parseDateAndArg(argRaw);
 
         try {
             switch (command) {
@@ -189,23 +205,23 @@ public class TelegramBot extends TelegramLongPollingBot {
 
                 case "/fg":
                 case "/find_group":
-                    if (arg.isEmpty()) sendMessage(chatId, threadId, "Пример: /fg 1-ИП-2");
-                    else sendMessageHTML(chatId, threadId, dbService.getScheduleByGroup(arg));
+                    if (parsed.text.isEmpty()) sendMessage(chatId, threadId, "Пример: /fg 1-ИП-2 [дата]");
+                    else sendMessageHTML(chatId, threadId, dbService.getScheduleByGroup(parsed.text, parsed.date));
                     break;
 
                 case "/ft":
                 case "/find_teacher":
-                    if (arg.isEmpty()) sendMessage(chatId, threadId, "Пример: /ft Сергеева");
-                    else sendMessageHTML(chatId, threadId, dbService.getScheduleByTeacher(arg));
+                    if (parsed.text.isEmpty()) sendMessage(chatId, threadId, "Пример: /ft Сергеева [дата]");
+                    else sendMessageHTML(chatId, threadId, dbService.getScheduleByTeacher(parsed.text, parsed.date));
                     break;
 
                 case "/fr":
                 case "/find_room":
                     try {
-                        if (arg.isEmpty()) throw new NumberFormatException();
-                        sendMessageHTML(chatId, threadId, dbService.getScheduleByRoom(Integer.parseInt(arg)));
+                        if (parsed.text.isEmpty()) throw new NumberFormatException();
+                        sendMessageHTML(chatId, threadId, dbService.getScheduleByRoom(Integer.parseInt(parsed.text), parsed.date));
                     } catch (NumberFormatException e) {
-                        sendMessage(chatId, threadId, "Пример: /fr 205");
+                        sendMessage(chatId, threadId, "Пример: /fr 205 [дата]");
                     }
                     break;
 
@@ -215,10 +231,10 @@ public class TelegramBot extends TelegramLongPollingBot {
                         sendMessage(chatId, threadId, "⛔ Только админы могут менять подписку.");
                         return;
                     }
-                    if (arg.isEmpty()) sendMessage(chatId, threadId, "Пример: /sg 1-ИП-2");
+                    if (parsed.text.isEmpty()) sendMessage(chatId, threadId, "Пример: /sg 1-ИП-2");
                     else {
-                        dbService.subscribeUser(chatId, threadId, 0, arg, "TG");
-                        sendMessage(chatId, threadId, "✅ Этот тред подписан на группу: " + arg);
+                        dbService.subscribeUser(chatId, threadId, 0, parsed.text, "TG");
+                        sendMessage(chatId, threadId, "✅ Этот тред подписан на группу: " + parsed.text);
                     }
                     break;
 
@@ -228,15 +244,20 @@ public class TelegramBot extends TelegramLongPollingBot {
                         sendMessage(chatId, threadId, "⛔ Только админы могут менять подписку.");
                         return;
                     }
-                    if (arg.isEmpty()) sendMessage(chatId, threadId, "Пример: /st Сергеева");
+                    if (parsed.text.isEmpty()) sendMessage(chatId, threadId, "Пример: /st Сергеева");
                     else {
-                        dbService.subscribeUser(chatId, threadId, 1, arg, "TG");
-                        sendMessage(chatId, threadId, "✅ Этот тред подписан на преподавателя: " + arg);
+                        dbService.subscribeUser(chatId, threadId, 1, parsed.text, "TG");
+                        sendMessage(chatId, threadId, "✅ Этот тред подписан на преподавателя: " + parsed.text);
                     }
                     break;
 
                 case "/my":
-                    handleMySchedule(chatId, threadId);
+                    String dateForMy = parsed.date;
+                    if (dateForMy == null && !parsed.text.isEmpty()) {
+                        Matcher m = DATE_PATTERN.matcher(parsed.text);
+                        if (m.find()) dateForMy = m.group(1);
+                    }
+                    handleMySchedule(chatId, threadId, dateForMy);
                     break;
 
                 case "/food":
@@ -245,11 +266,11 @@ public class TelegramBot extends TelegramLongPollingBot {
                 case "/broadcast":
                 case "/b":
                     if (userId != CREATOR_ID) return;
-                    if (arg.isEmpty()) {
+                    if (argRaw.isEmpty()) {
                         sendMessage(chatId, threadId, "Введите текст рассылки. Пример: /b Всем привет!");
                         return;
                     }
-                    performBroadcast(chatId, threadId, arg);
+                    performBroadcast(chatId, threadId, argRaw);
                     break;
             }
         } catch (SQLException e) {
@@ -273,16 +294,30 @@ public class TelegramBot extends TelegramLongPollingBot {
         sendMessage(adminChatId, adminThreadId, "✅ Рассылка завершена. Отправлено: " + count);
     }
 
-    private void handleMySchedule(long chatId, Integer threadId) throws SQLException {
+    private void handleMySchedule(long chatId, Integer threadId, String date) throws SQLException {
         String[] sub = dbService.getUserSubscription(chatId, threadId, "TG");
         if (sub == null) {
             sendMessage(chatId, threadId, "В этом треде нет активной подписки.");
             return;
         }
         String res = (Integer.parseInt(sub[0]) == 0)
-                ? dbService.getScheduleByGroup(sub[1])
-                : dbService.getScheduleByTeacher(sub[1]);
+                ? dbService.getScheduleByGroup(sub[1], date)
+                : dbService.getScheduleByTeacher(sub[1], date);
         sendMessageHTML(chatId, threadId, res);
+    }
+
+    private record ParsedArg(String text, String date) {}
+
+    private ParsedArg parseDateAndArg(String raw) {
+        if (raw == null || raw.isEmpty()) return new ParsedArg("", null);
+        Matcher m = DATE_PATTERN.matcher(raw);
+        String date = null;
+        String text = raw;
+        if (m.find()) {
+            date = m.group(1);
+            text = raw.replace(date, "").trim().replaceAll("\\s+", " ");
+        }
+        return new ParsedArg(text, date);
     }
 
     private void sendCanteenMenu(long chatId, Integer threadId) {
@@ -324,7 +359,7 @@ public class TelegramBot extends TelegramLongPollingBot {
     }
 
     private void sendHelp(long chatId, Integer threadId, boolean isPrivate) {
-        String txt = "🤖 <b>Команды:</b>\n/fg [группа], /ft [преподаватель], /fr [кабинет], /my, /food";
+        String txt = "🤖 <b>Команды:</b>\n/fg [группа] [дата], /ft [преподаватель] [дата], /fr [кабинет] [дата], /my [дата], /food";
         if (!isPrivate) txt += "\n\n🔒 <b>Админам:</b>\n/sg [группа] - Подписка треда\n/st [фамилия] - Подписка треда";
         sendMessageHTML(chatId, threadId, txt);
     }
@@ -349,7 +384,6 @@ public class TelegramBot extends TelegramLongPollingBot {
         try { execute(msg); } catch (Exception e) { e.printStackTrace(); }
     }
 
-    // Вспомогательный метод для отправки клавиатуры только с кнопкой "Назад"
     private void sendBackButtonKeyboard(long chatId, Integer threadId) {
         ReplyKeyboardMarkup markup = new ReplyKeyboardMarkup();
         markup.setResizeKeyboard(true);
