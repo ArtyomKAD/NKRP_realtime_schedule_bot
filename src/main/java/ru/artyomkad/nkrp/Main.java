@@ -1,0 +1,104 @@
+package ru.artyomkad.nkrp;
+
+import io.github.cdimascio.dotenv.Dotenv;
+import java.util.Timer;
+
+import org.telegram.telegrambots.bots.DefaultBotOptions;
+import org.telegram.telegrambots.meta.TelegramBotsApi;
+import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
+import ru.artyomkad.nkrp.bot.TelegramBot;
+import ru.artyomkad.nkrp.bot.VKCollegeBot;
+import ru.artyomkad.nkrp.service.BellParser;
+import ru.artyomkad.nkrp.service.DatabaseService;
+import ru.artyomkad.nkrp.service.ScheduleParser;
+import ru.artyomkad.nkrp.service.ScheduleUpdater;
+
+public class Main {
+
+    public static void main(String[] args) {
+        Dotenv dotenv = Dotenv.load();
+        String dbName = dotenv.get("DB_NAME");
+
+        String url = dotenv.get("SCHEDULE_URL");
+        String bellUrl = dotenv.get("BELL_URL");
+
+        String tgBotToken = dotenv.get("TG_BOT_TOKEN");
+        String tgBotName = dotenv.get("TG_BOT_NAME");
+
+        long tgCreatorId = Long.parseLong(dotenv.get("TG_CREATOR_ID", "0"));
+
+        int vkGroupId = Integer.parseInt(dotenv.get("VK_GROUP_ID"));
+        String vkToken = dotenv.get("VK_TOKEN");
+        long vkCreatorId = Long.parseLong(dotenv.get("VK_CREATOR_ID", "0"));
+
+        try {
+            DatabaseService dbService = new DatabaseService(dbName);
+            ScheduleParser parser = new ScheduleParser(url);
+            BellParser bellParser = new BellParser(bellUrl);
+
+            System.out.println("Loading bells...");
+            dbService.updateBells(bellParser.parse());
+
+            DefaultBotOptions botOptions = new DefaultBotOptions();
+            String proxyHost = dotenv.get("TG_PROXY_HOST");
+            if (proxyHost != null && !proxyHost.isBlank()) {
+                int proxyPort = Integer.parseInt(dotenv.get("TG_PROXY_PORT", "1080"));
+                botOptions.setProxyHost(proxyHost);
+                botOptions.setProxyPort(proxyPort);
+                botOptions.setProxyType(DefaultBotOptions.ProxyType.SOCKS5);
+                System.out.println("Telegram Bot: using proxy " + proxyHost + ":" + proxyPort);
+            }
+
+            TelegramBot tgBot = new TelegramBot(
+                    botOptions,
+                    tgBotToken,
+                    tgBotName,
+                    tgCreatorId,
+                    dbService
+            );
+            TelegramBotsApi botsApi = new TelegramBotsApi(
+                    DefaultBotSession.class
+            );
+            botsApi.registerBot(tgBot);
+            System.out.println("Telegram Bot started!");
+
+            VKCollegeBot vkBot = new VKCollegeBot(
+                    vkGroupId,
+                    vkToken,
+                    vkCreatorId,
+                    dbService
+            );
+
+            vkBot.start();
+
+            System.out.println("VK Bot started!");
+
+            Timer timer = new Timer();
+            timer.schedule(
+                    new ScheduleUpdater(
+                            parser,
+                            bellParser,
+                            dbService,
+                            tgBot,
+                            vkBot
+                    ),
+                    0,
+                    180000
+            );
+
+            Runtime.getRuntime().addShutdownHook(
+                    new Thread(() -> {
+                        try {
+                            System.out.println("Shutting down...");
+                            vkBot.interrupt();
+                            dbService.close();
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                        }
+                    })
+            );
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
