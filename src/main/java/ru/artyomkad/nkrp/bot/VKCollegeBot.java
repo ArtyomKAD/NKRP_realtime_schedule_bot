@@ -17,10 +17,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import static ru.artyomkad.nkrp.bot.BotUtil.parseDateAndArg;
 import static ru.artyomkad.nkrp.bot.BotUtil.ParsedArg;
+import static ru.artyomkad.nkrp.bot.BotUtil.DATE_PATTERN;
 
 public class VKCollegeBot extends Thread {
 
@@ -29,10 +29,6 @@ public class VKCollegeBot extends Thread {
     private final long creatorId;
     private final DatabaseService dbService;
     private final Random random = new Random();
-
-    private static final Pattern DATE_PATTERN = Pattern.compile(
-            "(?i)\\b(\\d{1,2}[./-]\\d{1,2}[./-]\\d{2,4}|\\d{1,2}\\s+(?:янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)[а-я]*(\\s+\\d{4})?)\\b"
-    );
 
     private enum BotState { DEFAULT, WAITING_FOR_SUB_GROUP, WAITING_FOR_SUB_TEACHER, WAITING_SEARCH_GROUP, WAITING_SEARCH_TEACHER, WAITING_SEARCH_ROOM }
     private final java.util.Map<Long, BotState> userStates = new java.util.concurrent.ConcurrentHashMap<>();
@@ -94,7 +90,18 @@ public class VKCollegeBot extends Thread {
         text = text.trim();
         String lowerText = text.toLowerCase();
 
+        boolean isGroup = peerId > 2000000000L;
+        if (isGroup && state == BotState.DEFAULT && !lowerText.startsWith("/")) {
+             if (!lowerText.equals("начало") && !lowerText.equals("назад") && !lowerText.equals("🔙 в главное меню")
+                 && !lowerText.equals("📅 моё расписание") && !lowerText.equals("🔍 поиск") 
+                 && !lowerText.equals("🔔 подписка") && !lowerText.equals("🍽️ столовая")
+                 && !lowerText.startsWith("поиск по группе") && !lowerText.startsWith("поиск по преподавателю")) {
+                 return;
+             }
+        }
+
         dbService.logUser(peerId, Platform.VKontakte, "id" + peerId, "VK User");
+        dbService.logAction(peerId, Platform.VKontakte, isGroup ? "Group: " + text : text);
 
         ParsedArg parsed = parseDateAndArg(text);
 
@@ -123,6 +130,10 @@ public class VKCollegeBot extends Thread {
                     }
                     case "📜 Список пользователей" -> {
                         sendUsersFile(peerId);
+                        return;
+                    }
+                    case "🕵️ Логи действий" -> {
+                        sendActionsFile(peerId);
                         return;
                     }
                     case "🔙 Выход" -> {
@@ -162,18 +173,22 @@ public class VKCollegeBot extends Thread {
                 }
 
                 switch (text) {
-                    case "📅 Моё расписание":
+                    case "📅 Моё расписание" -> {
                         handleMySchedule(peerId, null);
                         return;
-                    case "🔔 Подписка":
+                    }
+                    case "🔔 Подписка" -> {
                         sendMenu(peerId, "На что подписываемся?", getSubMenu());
                         return;
-                    case "🔍 Поиск":
+                    }
+                    case "🔍 Поиск" -> {
                         sendMenu(peerId, "Что ищем?", getSearchMenu());
                         return;
-                    case "🍽️ Столовая":
+                    }
+                    case "🍽️ Столовая" -> {
                         sendCanteenMenu(peerId);
                         return;
+                    }
                 }
 
                 switch (text) {
@@ -211,30 +226,29 @@ public class VKCollegeBot extends Thread {
             }
 
             switch (state) {
-                case WAITING_FOR_SUB_GROUP:
+                case WAITING_FOR_SUB_GROUP -> {
                     dbService.subscribeUser(peerId, null, 0, parsed.text(), Platform.VKontakte);
                     sendMessage(peerId, "✅ Вы подписались на группу: " + parsed.text());
                     goBack(peerId);
-                    break;
-                case WAITING_FOR_SUB_TEACHER:
+                }
+                case WAITING_FOR_SUB_TEACHER -> {
                     dbService.subscribeUser(peerId, null, 1, parsed.text(), Platform.VKontakte);
                     sendMessage(peerId, "✅ Вы подписались на преподавателя: " + parsed.text());
                     goBack(peerId);
-                    break;
-                case WAITING_SEARCH_GROUP:
+                }
+                case WAITING_SEARCH_GROUP -> {
                     sendMessage(peerId, dbService.getScheduleByGroup(parsed.text(), parsed.date()));
-                    break;
-                case WAITING_SEARCH_TEACHER:
+                }
+                case WAITING_SEARCH_TEACHER -> {
                     sendMessage(peerId, dbService.getScheduleByTeacher(parsed.text(), parsed.date()));
-                    break;
-                case WAITING_SEARCH_ROOM:
+                }
+                case WAITING_SEARCH_ROOM -> {
                     try {
                         int r = Integer.parseInt(parsed.text());
                         sendMessage(peerId, dbService.getScheduleByRoom(r, parsed.date()));
                     } catch(Exception e) { sendMessage(peerId, "Пожалуйста, введите числовой номер кабинета."); }
-                    break;
-                default:
-                    sendMessage(peerId, "Я вас не понимаю. Напишите 'Начало'.");
+                }
+                default -> sendMessage(peerId, "Я вас не понимаю. Напишите 'Начало'.");
             }
 
         } catch (Exception e) {
@@ -360,6 +374,44 @@ public class VKCollegeBot extends Thread {
         }
     }
 
+    private void sendActionsFile(long peerId) {
+        sendMessage(peerId, "⏳ Генерация логов...");
+        String report = dbService.getActionsReport();
+        File tempFile = null;
+        try {
+            tempFile = BotUtil.createTextFile(report, "actions_report");
+
+            var uploadServer = vk.docs().getMessagesUploadServer(actor)
+                    .peerId((int) peerId)
+                    .execute();
+
+            var uploadResponse = vk.upload().doc(
+                    String.valueOf(uploadServer.getUploadUrl()),
+                    tempFile
+            ).execute();
+
+            SaveResponse saveResponse = vk.docs().save(actor, uploadResponse.getFile())
+                    .title("actions_log.txt")
+                    .execute();
+
+            Doc doc = saveResponse.getDoc();
+            String attachment = "doc" + doc.getOwnerId() + "_" + doc.getId();
+
+            vk.messages().send(actor)
+                    .peerId((int) peerId)
+                    .message("🕵️ Последние действия пользователей")
+                    .attachment(attachment)
+                    .randomId(random.nextInt())
+                    .execute();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            sendMessage(peerId, "Ошибка: " + e.getMessage());
+        } finally {
+            if (tempFile != null) tempFile.delete();
+        }
+    }
+
     private void goBack(long peerId) {
         userStates.put(peerId, BotState.DEFAULT);
         sendMenu(peerId, "Главное меню", getMainMenu());
@@ -442,7 +494,7 @@ public class VKCollegeBot extends Thread {
         Keyboard k = new Keyboard();
         List<List<KeyboardButton>> rows = new ArrayList<>();
         rows.add(List.of(createBtn("📊 Статистика"), createBtn("📜 Список пользователей")));
-        rows.add(List.of(createBtn("🔙 Выход", KeyboardButtonColor.NEGATIVE)));
+        rows.add(List.of(createBtn("🕵️ Логи действий"), createBtn("🔙 Выход", KeyboardButtonColor.NEGATIVE)));
         k.setButtons(rows);
         return k;
     }

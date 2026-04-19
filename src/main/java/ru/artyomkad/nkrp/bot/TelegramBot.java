@@ -24,11 +24,11 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static ru.artyomkad.nkrp.bot.BotUtil.parseDateAndArg;
 import static ru.artyomkad.nkrp.bot.BotUtil.ParsedArg;
+import static ru.artyomkad.nkrp.bot.BotUtil.DATE_PATTERN;
 
 public class TelegramBot extends TelegramLongPollingBot {
 
@@ -36,10 +36,6 @@ public class TelegramBot extends TelegramLongPollingBot {
     private final long creatorId;
     private final DatabaseService dbService;
     private final Map<Long, BotState> userStates = new ConcurrentHashMap<>();
-
-    private static final Pattern DATE_PATTERN = Pattern.compile(
-            "(?i)\\b(\\d{1,2}[./-]\\d{1,2}[./-]\\d{2,4}|\\d{1,2}\\s+(?:янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)[а-я]*(\\s+\\d{4})?)\\b"
-    );
 
     private enum BotState {
         DEFAULT,
@@ -65,9 +61,7 @@ public class TelegramBot extends TelegramLongPollingBot {
         if (!update.hasMessage() || !update.getMessage().hasText()) return;
 
         Message message = update.getMessage();
-        boolean isPrivate = message.getChat().isUserChat();
-
-        if (isPrivate) {
+        if (message.getChat().isUserChat()) {
             handlePrivateChat(message);
         } else {
             handleGroupChat(message);
@@ -84,6 +78,7 @@ public class TelegramBot extends TelegramLongPollingBot {
         User user = message.getFrom();
         String name = (user.getFirstName() + " " + (user.getLastName() == null ? "" : user.getLastName())).trim();
         dbService.logUser(userId, Platform.Telegram, user.getUserName(), name);
+        dbService.logAction(userId, Platform.Telegram, text);
 
         try {
             if (userId == this.creatorId) {
@@ -98,6 +93,10 @@ public class TelegramBot extends TelegramLongPollingBot {
                     }
                     case "📜 Список пользователей" -> {
                         sendUsersFile(chatId, threadId);
+                        return;
+                    }
+                    case "🕵️ Логи действий" -> {
+                        sendActionsFile(chatId, threadId);
                         return;
                     }
                     case "🔙 Выход" -> {
@@ -115,20 +114,22 @@ public class TelegramBot extends TelegramLongPollingBot {
 
             if (state == BotState.DEFAULT) {
                 switch (text) {
-                    case "📅 Моё расписание":
-                    case "/my":
+                    case "📅 Моё расписание", "/my" -> {
                         handleMySchedule(chatId, threadId, null);
                         return;
-                    case "🔔 Подписка":
+                    }
+                    case "🔔 Подписка" -> {
                         sendMenu(chatId, threadId, "На что подписываемся?", getSubMenu());
                         return;
-                    case "🔍 Поиск":
+                    }
+                    case "🔍 Поиск" -> {
                         sendMenu(chatId, threadId, "Что ищем?", getSearchMenu());
                         return;
-                    case "🍽️ Столовая":
-                    case "/food":
+                    }
+                    case "🍽️ Столовая", "/food" -> {
                         sendCanteenMenu(chatId, threadId);
                         return;
+                    }
                 }
 
                 if (text.startsWith("/my ")) {
@@ -157,57 +158,55 @@ public class TelegramBot extends TelegramLongPollingBot {
                         sendDynamicKeyboard(chatId, threadId, "Выберите группу:", dbService.getAllGroups());
                         return;
                     }
-
                     case "👨‍🏫 Поиск по преподавателю" -> {
                         userStates.put(chatId, BotState.WAITING_SEARCH_TEACHER);
                         sendBackButtonKeyboard(chatId, threadId);
                         return;
                     }
-
-                    case "\uD83D\uDEAA Поиск по кабинету" -> {
+                    case "🚪 Поиск по кабинету" -> {
                         userStates.put(chatId, BotState.WAITING_SEARCH_ROOM);
                         List<String> rooms = dbService.getActiveRooms().stream().map(String::valueOf).collect(Collectors.toList());
                         sendDynamicKeyboard(chatId, threadId, "Выберите кабинет:", rooms);
                         return;
                     }
                 }
-
             }
 
             switch (state) {
-                case WAITING_FOR_SUB_GROUP:
+                case WAITING_FOR_SUB_GROUP -> {
                     dbService.subscribeUser(chatId, threadId, 0, text.trim(), Platform.Telegram);
                     sendMessage(chatId, threadId, "✅ Вы подписались на группу: " + text);
                     goBackToMain(chatId, threadId);
-                    break;
-                case WAITING_FOR_SUB_TEACHER:
+                }
+                case WAITING_FOR_SUB_TEACHER -> {
                     dbService.subscribeUser(chatId, threadId, 1, text.trim(), Platform.Telegram);
                     sendMessage(chatId, threadId, "✅ Вы подписались на преподавателя: " + text);
                     goBackToMain(chatId, threadId);
-                    break;
-                case WAITING_SEARCH_GROUP:
+                }
+                case WAITING_SEARCH_GROUP -> {
                     ParsedArg pa = parseDateAndArg(text);
                     sendMessageHTML(chatId, threadId, dbService.getScheduleByGroup(pa.text(), pa.date()));
                     goBackToMain(chatId, threadId);
-                    break;
-                case WAITING_SEARCH_TEACHER:
+                }
+                case WAITING_SEARCH_TEACHER -> {
                     ParsedArg pt = parseDateAndArg(text);
                     sendMessageHTML(chatId, threadId, dbService.getScheduleByTeacher(pt.text(), pt.date()));
                     goBackToMain(chatId, threadId);
-                    break;
-                case WAITING_SEARCH_ROOM:
+                }
+                case WAITING_SEARCH_ROOM -> {
                     try {
                         ParsedArg pr = parseDateAndArg(text);
                         int room = Integer.parseInt(pr.text());
                         sendMessageHTML(chatId, threadId, dbService.getScheduleByRoom(room, pr.date()));
                         goBackToMain(chatId, threadId);
                     } catch (NumberFormatException e) {
-                        sendMessage(chatId, threadId, "Введите число.");
+                        sendMessage(chatId, threadId, "Введите числовое значение кабинета.");
                     }
-                    break;
-                default:
+                }
+                default -> {
                     if (text.startsWith("/")) handleTextCommand(chatId, threadId, text, true, message);
                     else sendMessage(chatId, threadId, "Неизвестная команда или ввод.");
+                }
             }
 
         } catch (SQLException e) {
@@ -221,11 +220,12 @@ public class TelegramBot extends TelegramLongPollingBot {
         long chatId = message.getChatId();
         Integer threadId = message.getMessageThreadId();
 
+        if (!text.startsWith("/")) return;
+
         User user = message.getFrom();
         String name = (user.getFirstName() + " " + (user.getLastName() == null ? "" : user.getLastName())).trim();
         dbService.logUser(user.getId(), Platform.Telegram, user.getUserName(), name);
-
-        if (!text.startsWith("/")) return;
+        dbService.logAction(user.getId(), Platform.Telegram, "Group Command: " + text);
 
         handleTextCommand(chatId, threadId, text, false, message);
     }
@@ -241,35 +241,24 @@ public class TelegramBot extends TelegramLongPollingBot {
 
         try {
             switch (command) {
-                case "/start":
-                case "/help":
-                    sendHelp(chatId, threadId, isPrivate);
-                    break;
-
-                case "/fg":
-                case "/find_group":
+                case "/start", "/help" -> sendHelp(chatId, threadId, isPrivate);
+                case "/fg", "/find_group" -> {
                     if (parsed.text().isEmpty()) sendMessage(chatId, threadId, "Пример: /fg 1-ИП-2 [дата]");
                     else sendMessageHTML(chatId, threadId, dbService.getScheduleByGroup(parsed.text(), parsed.date()));
-                    break;
-
-                case "/ft":
-                case "/find_teacher":
+                }
+                case "/ft", "/find_teacher" -> {
                     if (parsed.text().isEmpty()) sendMessage(chatId, threadId, "Пример: /ft Сергеева [дата]");
                     else sendMessageHTML(chatId, threadId, dbService.getScheduleByTeacher(parsed.text(), parsed.date()));
-                    break;
-
-                case "/fr":
-                case "/find_room":
+                }
+                case "/fr", "/find_room" -> {
                     try {
                         if (parsed.text().isEmpty()) throw new NumberFormatException();
                         sendMessageHTML(chatId, threadId, dbService.getScheduleByRoom(Integer.parseInt(parsed.text()), parsed.date()));
                     } catch (NumberFormatException e) {
                         sendMessage(chatId, threadId, "Пример: /fr 205 [дата]");
                     }
-                    break;
-
-                case "/sg":
-                case "/sub_group":
+                }
+                case "/sg", "/sub_group" -> {
                     if (!isPrivate && cannotManageSubscription(originalMessage)) {
                         sendMessage(chatId, threadId, "⛔ Только админы могут менять подписку.");
                         return;
@@ -279,10 +268,8 @@ public class TelegramBot extends TelegramLongPollingBot {
                         dbService.subscribeUser(chatId, threadId, 0, parsed.text(), Platform.Telegram);
                         sendMessage(chatId, threadId, "✅ Этот тред подписан на группу: " + parsed.text());
                     }
-                    break;
-
-                case "/st":
-                case "/sub_teacher":
+                }
+                case "/st", "/sub_teacher" -> {
                     if (!isPrivate && cannotManageSubscription(originalMessage)) {
                         sendMessage(chatId, threadId, "⛔ Только админы могут менять подписку.");
                         return;
@@ -292,44 +279,37 @@ public class TelegramBot extends TelegramLongPollingBot {
                         dbService.subscribeUser(chatId, threadId, 1, parsed.text(), Platform.Telegram);
                         sendMessage(chatId, threadId, "✅ Этот тред подписан на преподавателя: " + parsed.text());
                     }
-                    break;
-
-                case "/unsub":
-                case "/unsubscribe":
+                }
+                case "/unsub", "/unsubscribe" -> {
                     if (!isPrivate && cannotManageSubscription(originalMessage)) {
                         sendMessage(chatId, threadId, "⛔ Только админы могут менять подписку.");
                         return;
                     }
                     dbService.unsubscribeUser(chatId, threadId, Platform.Telegram);
                     sendMessage(chatId, threadId, "✅ Подписка отключена для этого чата/треда.");
-                    break;
-
-                case "/my":
+                }
+                case "/my" -> {
                     String dateForMy = parsed.date();
                     if (dateForMy == null && !parsed.text().isEmpty()) {
                         Matcher m = DATE_PATTERN.matcher(parsed.text());
                         if (m.find()) dateForMy = m.group(1);
                     }
                     handleMySchedule(chatId, threadId, dateForMy);
-                    break;
-
-                case "/food":
-                    sendCanteenMenu(chatId, threadId);
-                    break;
-                case "/admin":
+                }
+                case "/food" -> sendCanteenMenu(chatId, threadId);
+                case "/admin" -> {
                     if (userId == this.creatorId && isPrivate) {
                         sendMenu(chatId, threadId, "⚙️ Панель администратора:", getAdminMenu());
                     }
-                    break;
-                case "/broadcast":
-                case "/b":
+                }
+                case "/broadcast", "/b" -> {
                     if (userId != this.creatorId) return;
                     if (argRaw.isEmpty()) {
                         sendMessage(chatId, threadId, "Введите текст рассылки. Пример: /b Всем привет!");
                         return;
                     }
                     performBroadcast(chatId, threadId, argRaw);
-                    break;
+                }
             }
         } catch (SQLException e) {
             e.printStackTrace();
@@ -346,9 +326,7 @@ public class TelegramBot extends TelegramLongPollingBot {
                 sendMessageHTML(sub.chatId(), sub.messageThreadId(), "⚠️ <b>Объявление:</b>\n\n" + text);
                 count++;
                 Thread.sleep(35);
-            } catch (Exception e) {
-                // Ignore block
-            }
+            } catch (Exception ignored) {}
         }
         sendMessage(adminChatId, adminThreadId, "✅ Рассылка завершена. Отправлено: " + count);
     }
@@ -394,6 +372,26 @@ public class TelegramBot extends TelegramLongPollingBot {
         } catch (Exception e) {
             e.printStackTrace();
             sendMessage(chatId, threadId, "Ошибка при создании отчета.");
+        } finally {
+            if (file != null) file.delete();
+        }
+    }
+
+    private void sendActionsFile(long chatId, Integer threadId) {
+        sendMessage(chatId, threadId, "⏳ Генерация логов...");
+        String report = dbService.getActionsReport();
+        File file = null;
+        try {
+            file = BotUtil.createTextFile(report, "actions_report");
+            SendDocument doc = new SendDocument();
+            doc.setChatId(String.valueOf(chatId));
+            doc.setMessageThreadId(threadId);
+            doc.setDocument(new InputFile(file, "actions_log.txt"));
+            doc.setCaption("🕵️ Последние действия пользователей");
+            execute(doc);
+        } catch (Exception e) {
+            e.printStackTrace();
+            sendMessage(chatId, threadId, "Ошибка при создании отчета логов.");
         } finally {
             if (file != null) file.delete();
         }
@@ -453,7 +451,6 @@ public class TelegramBot extends TelegramLongPollingBot {
                 errorMsg.contains("forbidden") ||
                 errorMsg.contains("user is deactivated") ||
                 errorMsg.contains("chat not found")) {
-
             dbService.unsubscribeUser(chatId, threadId, Platform.Telegram);
         } else {
             e.printStackTrace();
@@ -522,7 +519,7 @@ public class TelegramBot extends TelegramLongPollingBot {
         ReplyKeyboardMarkup markup = new ReplyKeyboardMarkup(); markup.setResizeKeyboard(true);
         List<KeyboardRow> rows = new ArrayList<>();
         KeyboardRow r1 = new KeyboardRow(); r1.add("🎓 Поиск по группе"); r1.add("👨‍🏫 Поиск по преподавателю");
-        KeyboardRow r2 = new KeyboardRow(); r2.add("\uD83D\uDEAA Поиск по кабинету");
+        KeyboardRow r2 = new KeyboardRow(); r2.add("🚪 Поиск по кабинету");
         KeyboardRow r3 = new KeyboardRow(); r3.add("🔙 В главное меню");
         rows.add(r1); rows.add(r2); rows.add(r3); markup.setKeyboard(rows); return markup;
     }
@@ -532,7 +529,7 @@ public class TelegramBot extends TelegramLongPollingBot {
         markup.setResizeKeyboard(true);
         List<KeyboardRow> rows = new ArrayList<>();
         KeyboardRow r1 = new KeyboardRow(); r1.add("📊 Статистика"); r1.add("📜 Список пользователей");
-        KeyboardRow r2 = new KeyboardRow(); r2.add("🔙 Выход");
+        KeyboardRow r2 = new KeyboardRow(); r2.add("🕵️ Логи действий"); r2.add("🔙 Выход");
         rows.add(r1);
         rows.add(r2);
         markup.setKeyboard(rows);

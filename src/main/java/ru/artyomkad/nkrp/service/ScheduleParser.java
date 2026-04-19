@@ -34,7 +34,7 @@ public class ScheduleParser {
     private static final Pattern RE_START_TIME = Pattern.compile("начало\\s+в\\s+(\\d{1,2}[:.]\\d{2})", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern RE_LABEL_FULL = Pattern.compile("^\\([^)]+\\)$");
     private static final Pattern RE_LABEL_INLINE = Pattern.compile("\\([^)]+\\)");
-    private static final Pattern RE_ROOM = Pattern.compile("[Аа]уд\\.?\\s*(.*)");
+    private static final Pattern RE_ROOM = Pattern.compile("[Аа][Уу]д\\.?\\s*(.*)");
     private static final Pattern RE_PAIR_NUM = Pattern.compile("(\\d)\\s*пара");
     private static final Pattern RE_ROLES_CLEAN = Pattern.compile("(?:Зам\\.?|Пред\\.?|Чл\\.?|Секр\\.?|Преп\\.?)[\\wа-яА-Я-]*|\\s+|[,.;]", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
@@ -84,7 +84,6 @@ public class ScheduleParser {
             Map<Integer, Element> row = matrix.get(r);
             if (row == null) continue;
 
-            // Определение номера пары
             Element firstCell = row.get(0);
             String pairCellText = (firstCell != null) ? firstCell.text().trim().toLowerCase() : "";
             Matcher mPair = RE_PAIR_NUM.matcher(pairCellText);
@@ -92,11 +91,10 @@ public class ScheduleParser {
             if (mPair.find()) {
                 currentPair = Integer.parseInt(mPair.group(1));
             } else if (pairCellText.contains("классный") || pairCellText.contains("разговоры")) {
-                currentPair = 0; // Нулевая пара
+                currentPair = 0;
             }
             rowToPair.put(r, currentPair);
 
-            // Проход по колонкам групп
             for (Map.Entry<Integer, String> entry : header.colMap.entrySet()) {
                 int c = entry.getKey();
                 String groupName = entry.getValue();
@@ -106,19 +104,47 @@ public class ScheduleParser {
 
                 Map<Integer, Element> prevRow = matrix.get(r - 1);
                 boolean isContinuation = (r > header.headerRow + 1) && (prevRow != null) && (prevRow.get(c) == cell);
-
                 Integer prevPair = rowToPair.get(r - 1);
                 boolean isSamePairBlock = (prevPair != null && prevPair == currentPair);
 
                 if (!isContinuation) {
-                    if (isSamePairBlock) {
-                        mergeOrAddLesson(cell, groupName, date, isMonday, currentPair);
+                    int rowspan = parseSpan(cell.attr("rowspan"));
+                    String textLower = cell.text().toLowerCase();
+                    String cellTextTrimmed = cell.text().trim();
+                    
+                    boolean isSpecialEvent = rowspan >= 3 || textLower.contains("практика") || textLower.contains("экзамен");
+                    boolean isHours = cellTextTrimmed.matches("^\\d+\\s*[/\\\\]\\s*\\d+$") || cellTextTrimmed.matches("^\\d+\\s*ч\\.?$");
+
+                    if (isHours) {
+                        // Если это просто ячейка с часами (например, 42/288), добавляем к последней практике
+                        DaySchedule ds = getSchedule(groupName, date, isMonday);
+                        if (!ds.getSpecialEvents().isEmpty()) {
+                            Lesson lastEvent = ds.getSpecialEvents().getLast();
+                            lastEvent.setSubject(lastEvent.getSubject() + " (" + cellTextTrimmed + ")");
+                            lastEvent.setRaw(lastEvent.getRaw() + " | " + cellTextTrimmed);
+                        }
+                    } else if (isSpecialEvent) {
+                        addSpecialEvent(cell, groupName, date, isMonday);
                     } else {
-                        addLesson(cell, groupName, date, isMonday, currentPair);
+                        if (isSamePairBlock) {
+                            mergeOrAddLesson(cell, groupName, date, isMonday, currentPair);
+                        } else {
+                            addLesson(cell, groupName, date, isMonday, currentPair);
+                        }
                     }
                 }
             }
         }
+    }
+
+    private void addSpecialEvent(Element cell, String group, String date, boolean isMonday) {
+        List<String> lines = extractLines(cell);
+        if (lines.isEmpty() || (lines.size() == 1 && lines.getFirst().equals("&nbsp;"))) return;
+
+        Lesson lesson = parseLessonData(lines);
+        if (lesson.getSubject().isEmpty() && lesson.getRaw().length() < 3) return;
+
+        getSchedule(group, date, isMonday).getSpecialEvents().add(lesson);
     }
 
     private void addLesson(Element cell, String group, String date, boolean isMonday, int pair) {
@@ -142,26 +168,27 @@ public class ScheduleParser {
             addLesson(cell, group, date, isMonday, pair);
         } else {
             Lesson lastLesson = lessons.getLast();
-
             List<String> combinedLines = new ArrayList<>();
             if (lastLesson.getRaw() != null && !lastLesson.getRaw().isEmpty()) {
                 combinedLines.addAll(Arrays.asList(lastLesson.getRaw().split(" \\| ")));
             }
             combinedLines.addAll(newLines);
-
             Lesson mergedLesson = parseLessonData(combinedLines);
             lessons.set(lessons.size() - 1, mergedLesson);
         }
     }
 
-    private Period getPeriod(String group, String date, boolean isMonday, int pair) {
+    private DaySchedule getSchedule(String group, String date, boolean isMonday) {
         return result.computeIfAbsent(group, _ -> new LinkedHashMap<>())
                 .computeIfAbsent(date, _ -> {
                     DaySchedule ds = new DaySchedule();
                     ds.setMonday(isMonday);
                     return ds;
-                })
-                .getPeriods()
+                });
+    }
+
+    private Period getPeriod(String group, String date, boolean isMonday, int pair) {
+        return getSchedule(group, date, isMonday).getPeriods()
                 .computeIfAbsent(pair, k -> {
                     Period p = new Period();
                     p.setNumber(k);
@@ -329,7 +356,6 @@ public class ScheduleParser {
         return l;
     }
 
-    // --- DTO ---
     private static class DateInfo { String date; boolean isMonday; DateInfo(String d, boolean m) { date = d; isMonday = m; } }
     private static class HeaderInfo { int headerRow; Map<Integer, String> colMap; HeaderInfo(int h, Map<Integer, String> c) { headerRow = h; colMap = c; } }
 }

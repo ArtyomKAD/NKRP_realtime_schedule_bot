@@ -54,5 +54,7 @@ public class BotUtil {
         return tempFile;
     }
 
-    public BotUtil() {}
+    private BotUtil() {
+        // Утилитарный класс
+    }
 }

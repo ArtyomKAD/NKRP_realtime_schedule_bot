@@ -70,7 +70,6 @@ public class Main {
             );
 
             vkBot.start();
-
             System.out.println("VK Bot started!");
 
             Timer timer = new Timer();

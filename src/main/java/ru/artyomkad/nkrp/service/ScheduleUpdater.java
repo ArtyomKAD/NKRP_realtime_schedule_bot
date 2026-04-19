@@ -109,6 +109,9 @@ public class ScheduleUpdater extends TimerTask {
                 sb.append(entry.getKey()).append(":").append(lesson.getSubject()).append(":").append(lesson.getRaw()).append("|");
             }
         }
+        for (Lesson event : schedule.getSpecialEvents()) {
+            sb.append("-1:").append(event.getSubject()).append(":").append(event.getRaw()).append("|");
+        }
         return sb.toString();
     }
 
@@ -117,6 +120,9 @@ public class ScheduleUpdater extends TimerTask {
             for (Lesson lesson : period.getLessons()) {
                 if (lesson.getTeachers() != null) accumulator.addAll(lesson.getTeachers());
             }
+        }
+        for (Lesson event : schedule.getSpecialEvents()) {
+            if (event.getTeachers() != null) accumulator.addAll(event.getTeachers());
         }
     }
 }
