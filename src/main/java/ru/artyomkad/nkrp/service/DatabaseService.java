@@ -24,6 +24,7 @@ import java.util.regex.Pattern;
 public class DatabaseService implements AutoCloseable {
     private static final Logger logger = Logger.getLogger(DatabaseService.class.getName());
     private final Connection connection;
+    private Map<String, String> canteenTimes = new java.util.concurrent.ConcurrentHashMap<>();
 
     private static final String[] MONTHS_GENITIVE = {
             "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -53,8 +54,9 @@ public class DatabaseService implements AutoCloseable {
 
     private record ScheduleMeta(String dateVal, boolean isMonday) {}
 
-    public DatabaseService(String dbName) throws SQLException {
+    public DatabaseService(String dbName, Map<String, String> canteenTimes) throws SQLException {
         this.connection = DriverManager.getConnection("jdbc:sqlite:" + dbName);
+        this.canteenTimes = canteenTimes;
         initTables();
     }
 
@@ -130,6 +132,12 @@ public class DatabaseService implements AutoCloseable {
         }
     }
 
+    public void setCanteenTimes(Map<String, String> times) {
+        if (times != null) {
+            this.canteenTimes = new java.util.concurrent.ConcurrentHashMap<>(times);
+        }
+    }
+
     public void logUser(long userId, Platform platform, String username, String fullName) {
         String sql = "INSERT INTO bot_users(user_id, platform, username, full_name, last_seen) VALUES(?, ?, ?, ?, ?) " +
                 "ON CONFLICT(user_id, platform) DO UPDATE SET " +
@@ -149,6 +157,22 @@ public class DatabaseService implements AutoCloseable {
         } catch (SQLException e) {
             logger.log(Level.SEVERE, "Error logging user", e);
         }
+    }
+
+    public void logAction(long userId, Platform platform, String action) {
+        String sql = "INSERT INTO user_actions(user_id, platform, action, created_at) VALUES(?, ?, ?, ?)";
+        String now = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
+
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, userId);
+            ps.setString(2, platform.toString());
+            ps.setString(3, action);
+            ps.setString(4, now);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.log(Level.SEVERE, "Error logging action", e);
+        }
+        logger.info(String.format("[%s] User %d performed action: %s", platform, userId, action));
     }
 
     public String getUsersStats() {
@@ -201,22 +225,6 @@ public class DatabaseService implements AutoCloseable {
             return "Error generating report: " + e.getMessage();
         }
         return sb.toString();
-    }
-
-    public void logAction(long userId, Platform platform, String action) {
-        String sql = "INSERT INTO user_actions(user_id, platform, action, created_at) VALUES(?, ?, ?, ?)";
-        String now = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new Date());
-
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setLong(1, userId);
-            ps.setString(2, platform.toString());
-            ps.setString(3, action);
-            ps.setString(4, now);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            logger.log(Level.SEVERE, "Error logging action", e);
-        }
-        logger.info(String.format("[%s] User %d performed action: %s", platform, userId, action));
     }
 
     public String getActionsReport() {
@@ -436,6 +444,10 @@ public class DatabaseService implements AutoCloseable {
                 if (isMonday) sb.append("<i>(Понедельник)</i>\n");
                 sb.append("\n");
 
+                if (canteenTimes.containsKey(groupNameUpper)) {
+                    sb.append("🍽️ <b>В столовую:</b> в ").append(canteenTimes.get(groupNameUpper)).append("\n\n");
+                }
+
                 appendLessons(sb, scheduleId, isMonday);
             } else {
                 if (date != null && !date.isEmpty()) {
@@ -487,6 +499,7 @@ public class DatabaseService implements AutoCloseable {
 
             while (rs.next()) {
                 String dbTeacher = rs.getString("teacher_name");
+                // Реализация нестрогого поиска (Case Insensitive) через Java
                 if (dbTeacher == null || !dbTeacher.toLowerCase().contains(searchTeacherLower)) {
                     continue;
                 }

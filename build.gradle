@@ -18,6 +18,7 @@ dependencies {
     implementation 'org.slf4j:slf4j-simple:2.0.17'
     implementation 'com.vk.api:sdk:1.0.14'
     implementation 'io.github.cdimascio:dotenv-java:3.0.0'
+    implementation 'org.apache.pdfbox:pdfbox:2.0.30'
 
     compileOnly 'org.projectlombok:lombok:1.18.42'
     annotationProcessor 'org.projectlombok:lombok:1.18.42'

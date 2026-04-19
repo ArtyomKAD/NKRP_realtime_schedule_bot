@@ -1,6 +1,7 @@
 package ru.artyomkad.nkrp;
 
 import io.github.cdimascio.dotenv.Dotenv;
+
 import java.util.Timer;
 
 import org.telegram.telegrambots.bots.DefaultBotOptions;
@@ -8,10 +9,7 @@ import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 import ru.artyomkad.nkrp.bot.TelegramBot;
 import ru.artyomkad.nkrp.bot.VKCollegeBot;
-import ru.artyomkad.nkrp.service.BellParser;
-import ru.artyomkad.nkrp.service.DatabaseService;
-import ru.artyomkad.nkrp.service.ScheduleParser;
-import ru.artyomkad.nkrp.service.ScheduleUpdater;
+import ru.artyomkad.nkrp.service.*;
 
 public class Main {
 
@@ -32,7 +30,10 @@ public class Main {
         long vkCreatorId = Long.parseLong(dotenv.get("VK_CREATOR_ID", "0"));
 
         try {
-            DatabaseService dbService = new DatabaseService(dbName);
+            CanteenParser canteenParser = new CanteenParser("https://www.novkrp.ru/data/covid_pit.pdf");
+            CanteenParser.CanteenData initialCanteen = canteenParser.parse();
+
+            DatabaseService dbService = new DatabaseService(dbName, initialCanteen.getTimes());
             ScheduleParser parser = new ScheduleParser(url);
             BellParser bellParser = new BellParser(bellUrl);
 
@@ -77,9 +78,11 @@ public class Main {
                     new ScheduleUpdater(
                             parser,
                             bellParser,
+                            canteenParser,
                             dbService,
                             tgBot,
-                            vkBot
+                            vkBot,
+                            initialCanteen.getDate()
                     ),
                     0,
                     180000
