@@ -6,8 +6,10 @@ import ru.artyomkad.nkrp.model.DaySchedule;
 import ru.artyomkad.nkrp.model.Lesson;
 import ru.artyomkad.nkrp.model.Period;
 
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -17,6 +19,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class ScheduleUpdater extends TimerTask {
+    private static final long CANTEEN_WAIT_TIMEOUT_MS = 30 * 60 * 1000L; // 30 минут
+
     private final ScheduleParser parser;
     private final BellParser bellParser;
     private final CanteenParser canteenParser;
@@ -25,8 +29,14 @@ public class ScheduleUpdater extends TimerTask {
     private final VKCollegeBot vkBot;
 
     private String lastCanteenDateNormalized;
-    private boolean isCheckingCanteen = false;
-    private String targetScheduleDateNormalized = "";
+
+    // --- Состояние ожидания публикации ---
+    // Группы, у которых обнаружено изменение и ожидается публикация
+    private final Map<String, DaySchedule> pendingGroups = new LinkedHashMap<>();
+    // Дата расписания (нормализованная), для которой ждём столовую
+    private String pendingScheduleDateNormalized = "";
+    // Время, когда началось ожидание столовой
+    private long pendingStartTimeMs = 0L;
 
     public ScheduleUpdater(ScheduleParser parser, BellParser bellParser, CanteenParser canteenParser, DatabaseService dbService,
                            TelegramBot tgBot, VKCollegeBot vkBot, String initialCanteenDate) {
@@ -65,9 +75,11 @@ public class ScheduleUpdater extends TimerTask {
     public void run() {
         System.out.println("Checking for updates (" + new Date() + ")...");
         try {
+            // Обновляем звонки
             BellParser.BellsData bells = bellParser.parse();
             dbService.updateBells(bells);
 
+            // Парсим расписание
             Map<String, Map<String, DaySchedule>> newData = parser.parse();
             if (newData.isEmpty()) return;
 
@@ -82,55 +94,17 @@ public class ScheduleUpdater extends TimerTask {
             }
             String currentTargetNormalized = normalizeDate(latestDateRaw);
 
-            boolean scheduleUpdated = false;
-            Set<String> affectedTeachers = new HashSet<>();
-
-            // 1. Первый проход: просто проверяем, было ли обновление хотя бы у одной группы
-            for (Map.Entry<String, Map<String, DaySchedule>> groupEntry : newData.entrySet()) {
-                String groupName = groupEntry.getKey();
-                for (Map.Entry<String, DaySchedule> dateEntry : groupEntry.getValue().entrySet()) {
-                    String date = dateEntry.getKey();
-                    String newSignature = generateSignature(dateEntry.getValue());
-                    String oldSignature = dbService.getGroupScheduleSignature(groupName, date);
-                    if (!newSignature.equals(oldSignature)) {
-                        scheduleUpdated = true;
-                        break;
-                    }
-                }
-                if (scheduleUpdated) break;
+            // Если дата расписания сменилась — сбрасываем старый pending
+            if (!currentTargetNormalized.isEmpty()
+                    && !currentTargetNormalized.equals(pendingScheduleDateNormalized)
+                    && !pendingGroups.isEmpty()) {
+                System.out.println("Schedule date changed (" + pendingScheduleDateNormalized + " -> " + currentTargetNormalized + "). Resetting pending queue.");
+                pendingGroups.clear();
+                pendingScheduleDateNormalized = "";
+                pendingStartTimeMs = 0L;
             }
 
-            // 2. Если расписание обновилось, активируем поллинг столовой для поиска этой даты
-            if (scheduleUpdated) {
-                targetScheduleDateNormalized = currentTargetNormalized;
-                isCheckingCanteen = true;
-            }
-
-            // 3. Проверка обновлений столовой
-            if (isCheckingCanteen && !targetScheduleDateNormalized.isEmpty()) {
-                if (!targetScheduleDateNormalized.equals(lastCanteenDateNormalized)) {
-                    System.out.println("Checking canteen updates. Target date: " + targetScheduleDateNormalized);
-                    CanteenParser.CanteenData cData = canteenParser.parse();
-                    String fetchedCanteenNormalized = normalizeDate(cData.getDate());
-
-                    // Если файл столовой имеет новую дату (даже если она еще не та, которую мы ждем), обновляем базу
-                    if (!fetchedCanteenNormalized.equals(lastCanteenDateNormalized) && !fetchedCanteenNormalized.isEmpty()) {
-                        System.out.println("Canteen schedule updated to: " + cData.getDate());
-                        dbService.setCanteenTimes(cData.getTimes());
-                        lastCanteenDateNormalized = fetchedCanteenNormalized;
-                    }
-
-                    if (fetchedCanteenNormalized.equals(targetScheduleDateNormalized)) {
-                        System.out.println("Canteen schedule is now fully in sync with main schedule.");
-                        isCheckingCanteen = false; // Отключаем проверку, так как даты совпали
-                    }
-                } else {
-                    isCheckingCanteen = false; // Даты уже совпадают
-                }
-            }
-
-            // 4. Второй проход: сохранение нового расписания в БД и отправка уведомлений
-            // Мы делаем это ПОСЛЕ проверки столовой, чтобы в уведомления попали свежие данные из столовой (если она уже обновилась)
+            // 1. Первый проход: собираем группы с изменениями в pending
             for (Map.Entry<String, Map<String, DaySchedule>> groupEntry : newData.entrySet()) {
                 String groupName = groupEntry.getKey();
                 for (Map.Entry<String, DaySchedule> dateEntry : groupEntry.getValue().entrySet()) {
@@ -142,22 +116,95 @@ public class ScheduleUpdater extends TimerTask {
 
                     if (!newSignature.equals(oldSignature)) {
                         System.out.println("Change detected for group: " + groupName + " on " + date);
+                        // Сохраняем в БД сразу — чтобы подписчики видели актуальное расписание при запросе
                         dbService.saveSingleGroupSchedule(groupName, date, newSchedule);
 
-                        notifyGroupSubscribers(groupName);
-                        collectTeachers(newSchedule, affectedTeachers);
+                        // Добавляем в очередь ожидания публикации (если ещё не добавлено)
+                        pendingGroups.putIfAbsent(groupName, newSchedule);
+
+                        if (pendingScheduleDateNormalized.isEmpty()) {
+                            pendingScheduleDateNormalized = currentTargetNormalized;
+                            pendingStartTimeMs = System.currentTimeMillis();
+                            System.out.println("Pending publish started. Waiting for canteen date: " + pendingScheduleDateNormalized);
+                        }
                     }
                 }
             }
 
-            for (String teacherName : affectedTeachers) {
-                notifyTeacherSubscribers(teacherName);
+            // 2. Если есть pending группы — проверяем столовую
+            if (!pendingGroups.isEmpty()) {
+                boolean canteenReady = checkCanteenSync();
+                boolean timedOut = (System.currentTimeMillis() - pendingStartTimeMs) >= CANTEEN_WAIT_TIMEOUT_MS;
+
+                if (canteenReady) {
+                    System.out.println("Canteen date matches schedule date. Publishing with canteen info.");
+                    publishPending();
+                } else if (timedOut) {
+                    System.out.println("Canteen wait timeout (30 min) reached. Publishing without canteen info.");
+                    publishPending();
+                } else {
+                    long remaining = (CANTEEN_WAIT_TIMEOUT_MS - (System.currentTimeMillis() - pendingStartTimeMs)) / 1000;
+                    System.out.println("Waiting for canteen... timeout in " + remaining + "s. " +
+                            "Canteen date: " + lastCanteenDateNormalized + ", need: " + pendingScheduleDateNormalized);
+                }
             }
 
             System.out.println("Update check finished.");
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    /**
+     * Проверяет, совпадает ли дата столовой с датой расписания.
+     * Если столовая обновилась — обновляем данные в dbService.
+     * @return true если дата столовой совпадает с ожидаемой
+     */
+    private boolean checkCanteenSync() {
+        // Если даты уже совпадают — сразу true (столовая уже актуальна)
+        if (pendingScheduleDateNormalized.equals(lastCanteenDateNormalized)) {
+            return true;
+        }
+
+        System.out.println("Checking canteen update. Target: " + pendingScheduleDateNormalized + ", current: " + lastCanteenDateNormalized);
+        try {
+            CanteenParser.CanteenData cData = canteenParser.parse();
+            String fetchedNormalized = normalizeDate(cData.getDate());
+
+            // Если столовая обновилась — применяем новые данные
+            if (!fetchedNormalized.isEmpty() && !fetchedNormalized.equals(lastCanteenDateNormalized)) {
+                System.out.println("Canteen schedule updated: " + lastCanteenDateNormalized + " -> " + fetchedNormalized);
+                dbService.setCanteenTimes(cData.getTimes());
+                lastCanteenDateNormalized = fetchedNormalized;
+            }
+
+            return pendingScheduleDateNormalized.equals(lastCanteenDateNormalized);
+        } catch (Exception e) {
+            System.err.println("Error checking canteen: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Публикует уведомления для всех pending-групп и сбрасывает очередь.
+     */
+    private void publishPending() {
+        Set<String> affectedTeachers = new HashSet<>();
+
+        for (Map.Entry<String, DaySchedule> entry : pendingGroups.entrySet()) {
+            String groupName = entry.getKey();
+            notifyGroupSubscribers(groupName);
+            collectTeachers(entry.getValue(), affectedTeachers);
+        }
+
+        for (String teacherName : affectedTeachers) {
+            notifyTeacherSubscribers(teacherName);
+        }
+
+        // Сброс состояния
+        pendingGroups.clear();
+        pendingScheduleDateNormalized = "";
+        pendingStartTimeMs = 0L;
     }
 
     private void notifyGroupSubscribers(String groupName) {
